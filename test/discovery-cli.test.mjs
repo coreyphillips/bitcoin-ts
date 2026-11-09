@@ -18,13 +18,13 @@ const answers = ['8.8.8.8', '1.1.1.1'];
 const mainGenesis = '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f';
 const regtestGenesis = '0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206';
 
-function setup(t) {
+function setup(t, candidates = answers) {
   const dir = mkdtempSync(join(tmpdir(), 'bitcoin-ts-discovery-'));
   const trace = join(dir, 'requests.jsonl');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const env = port => {
     writeFileSync(trace, '');
-    return { ...process.env, BITCOIN_TEST_NETWORK: JSON.stringify({ trace, port, answers }) };
+    return { ...process.env, BITCOIN_TEST_NETWORK: JSON.stringify({ trace, port, answers: candidates }) };
   };
   return {
     dir,
@@ -83,11 +83,11 @@ function tip(stdout) {
   return JSON.parse(stdout.trim().split('\n').at(-1)).tip;
 }
 
-test('plain sync discovers mainnet peers, tries an alternative and remembers it on restart', async t => {
+test('one connection slot discovers alternatives and remembers a peer on restart', async t => {
   const cli = setup(t);
   const peer = await startPeer(t, 'f9beb4d9');
   peer.dropNextConnection();
-  const first = await cli.run(peer.port);
+  const first = await cli.run(peer.port, '--max-peers', '1');
   assert.equal(tip(first.stdout), mainGenesis);
   const trace = cli.requests();
   assert.ok(trace.some(entry => entry.query));
@@ -95,13 +95,13 @@ test('plain sync discovers mainnet peers, tries an alternative and remembers it 
   assert.deepEqual(dials.map(entry => entry.host).sort(), [...answers].sort());
   assert.ok(dials.every(entry => entry.port === 8333));
 
-  const second = await cli.run(peer.port);
+  const second = await cli.run(peer.port, '--max-peers', '1');
   assert.equal(tip(second.stdout), mainGenesis);
   // A previously useful peer can bootstrap a new process with DNS unavailable.
   assert.deepEqual(cli.requests(), [dials.at(-1)]);
 
   peer.dropNextConnection();
-  const recovered = await cli.run(peer.port);
+  const recovered = await cli.run(peer.port, '--max-peers', '1');
   assert.equal(tip(recovered.stdout), mainGenesis);
   const retry = cli.requests();
   assert.deepEqual(retry[0], dials.at(-1));
@@ -125,14 +125,27 @@ test('private networks require an explicit peer without consulting public DNS', 
   }
 });
 
-test('startup with no arguments follows mainnet and reconnects after reaching the peer tip', async t => {
-  const network = setup(t);
+test('startup follows eight simultaneous mainnet peers and fills a vacated slot', async t => {
+  const candidates = ['1.1.1.1', '8.8.8.8', '9.9.9.9', '4.2.2.2', '208.67.222.222',
+    '76.76.2.0', '64.6.64.6', '94.140.14.14', '80.80.80.80'];
+  const network = setup(t, candidates);
   const ready = Promise.withResolvers();
-  let caughtUp = 0;
+  const responsive = new Set();
+  let dropped;
   const peer = await startPeer(t, 'f9beb4d9', socket => {
-    // Pongs after the last headers message prove the node kept following the peer.
-    if (++caughtUp === 1) socket.destroy();
-    else ready.resolve();
+    responsive.add(socket);
+    const live = [...responsive].filter(s => !s.destroyed);
+    if (live.length !== 8) return;
+    if (!dropped) {
+      if (network.requests().filter(event => event.host).length !== 8) {
+        ready.reject(new Error('Dialed a ninth peer before a slot opened'));
+        return;
+      }
+      dropped = live[0];
+      dropped.destroy();
+    } else if (responsive.size === 9) {
+      ready.resolve();
+    }
   });
   const child = spawn(process.execPath, ['--import', preload, cli], {
     cwd: network.dir, env: network.env(peer.port), stdio: ['ignore', 'ignore', 'pipe'],
@@ -151,12 +164,13 @@ test('startup with no arguments follows mainnet and reconnects after reaching th
     await exited;
   }
   const peers = network.requests().filter(event => event.host).map(event => event.host);
-  assert.deepEqual([...peers].sort(), [...answers].sort());
+  assert.deepEqual([...peers].sort(), [...candidates].sort());
   const directory = join(network.dir, 'data', 'main');
   assert.ok(existsSync(join(directory, 'chain.sqlite')));
   const store = new ChainStore(directory, 'main');
   try {
     assert.equal(store.chain.tip().tip, mainGenesis);
-    assert.deepEqual(store.knownPeers(), [peers.at(-1)]);
+    assert.equal(store.knownPeers().length, 8);
+    assert.ok(store.knownPeers().includes(peers.at(-1)));
   } finally { store.close(); }
 });

@@ -2,6 +2,7 @@
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { hex, integer, networkName, networkOptions } from './input.js';
+import { DEFAULT_MAX_PEERS, MAX_PEERS, syncPeers } from './pool.js';
 
 const help = `bitcoin-ts
 
@@ -9,14 +10,15 @@ const help = `bitcoin-ts
   bitcoin-ts harness
   bitcoin-ts tx <serialized-transaction-hex>
   bitcoin-ts status [--network NAME] [--datadir PATH] [--options JSON]
-  bitcoin-ts sync [--connect HOST[:PORT]] [--network NAME] [--datadir PATH]
+  bitcoin-ts sync [--connect HOST[:PORT]]... [--max-peers N] [--network NAME] [--datadir PATH]
                   [--stop-at HASH | --follow] [--timeout SECONDS] [--options JSON]
 
 Networks: main, testnet3, testnet4, signet, regtest.
 Automatic sync defaults to main. Status and explicit --connect default to regtest.
 State defaults to ./data/<network>. Use the same options when reopening a directory.
 Public networks discover peers automatically. Regtest and custom networks require --connect.
-Sync exits when caught up. --follow stays connected and retries discovered peers after a disconnect.
+Sync maintains up to ${DEFAULT_MAX_PEERS} outbound peers by default. Use --max-peers 1..${MAX_PEERS} to set the limit.
+Repeat --connect to use a fixed set of peers. --follow keeps following the chain after sync.
 `;
 
 async function main(args: string[]) {
@@ -50,15 +52,16 @@ async function main(args: string[]) {
   if (command !== 'sync' && command !== 'status') throw new Error(`Unknown command ${command}. Run bitcoin-ts --help`);
   const { values } = parseArgs({ args: rest, options: {
     network: { type: 'string' }, datadir: { type: 'string' },
-    options: { type: 'string', default: '{}' }, connect: { type: 'string' },
+    options: { type: 'string', default: '{}' }, connect: { type: 'string', multiple: true }, 'max-peers': { type: 'string' },
     'stop-at': { type: 'string' }, follow: { type: 'boolean' }, timeout: { type: 'string' },
   }});
   const automatic = command === 'sync' && values.connect === undefined;
   const network = networkName(values.network ?? (automatic ? 'main' : 'regtest'));
   const opts = networkOptions(JSON.parse(values.options!), network);
-  if (command === 'status' && [values.connect, values['stop-at'], values.follow, values.timeout].some(x => x !== undefined)) {
+  if (command === 'status' && [values.connect, values['stop-at'], values.follow, values.timeout, values['max-peers']].some(x => x !== undefined)) {
     throw new Error('Connection options apply only to sync');
   }
+  const maxPeers = integer(Number(values['max-peers'] ?? DEFAULT_MAX_PEERS), 'max-peers', 1, MAX_PEERS);
   const stopAt = values['stop-at'] === undefined ? undefined : hex(values['stop-at'], 'stop-at', 32).toString('hex');
   if (stopAt && values.follow) throw new Error('Choose --stop-at or --follow');
   const timeout = integer(Number(values.timeout ?? 60), 'timeout seconds', 1, 86400) * 1000;
@@ -78,20 +81,24 @@ async function main(args: string[]) {
           }
         },
       };
+      const connected = new Set<string>();
+      const poolOptions = {
+        ...syncOptions, maxPeers,
+        onPeer(address: string, state: 'connecting' | 'ready' | 'failed', reason?: string) {
+          if (state === 'ready') connected.add(address);
+          if (state === 'failed') connected.delete(address);
+          const count = state === 'connecting' ? '' : ` (${connected.size} connected)`;
+          console.error(`Peer ${address} ${state}${count}${reason ? ': ' + reason : ''}`);
+        },
+        onRetry(delay: number, reason: string) {
+          console.error(`${reason}. Retrying peers in ${delay / 1000}s`);
+        },
+      };
       if (automatic) {
         const { syncNetwork } = await import('./discovery.js');
-        await syncNetwork(store, {
-          ...syncOptions,
-          onPeer(address, state, reason) {
-            console.error(`Peer ${address} ${state}${reason ? ': ' + reason : ''}`);
-          },
-          onRetry(delay, reason) {
-            console.error(`${reason}. Retrying peer discovery in ${delay / 1000}s`);
-          },
-        });
+        await syncNetwork(store, poolOptions);
       } else {
-        const { syncPeer } = await import('./peer.js');
-        await syncPeer(store, values.connect!, syncOptions);
+        await syncPeers(store, values.connect!, poolOptions);
       }
     }
     console.log(JSON.stringify({ ...(command === 'sync' ? { event: 'stopped' } : {}), network,

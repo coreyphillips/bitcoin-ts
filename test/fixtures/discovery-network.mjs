@@ -20,7 +20,7 @@ const connect = net.createConnection;
 net.createConnection = function(options, ...args) {
   const { host } = options;
   record({ host, port: options.port });
-  if (!['8.8.8.8', '1.1.1.1', '127.0.0.1'].includes(host) || !port) {
+  if (![...answers, '127.0.0.1'].includes(host) || !port) {
     throw new Error('Unexpected test connection to ' + host);
   }
   return connect({ ...options, host: '127.0.0.1', port }, ...args);

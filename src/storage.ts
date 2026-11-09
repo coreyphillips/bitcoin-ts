@@ -18,6 +18,7 @@ function queries(chain: Chain, requireOpen: () => void) {
     bestHeader: read(chain.bestHeader), utxoHash: read(chain.utxoHash),
     locator: read(chain.locator), missingBlocks: read(chain.missingBlocks),
     hasHeader: read(chain.hasHeader), answerHeaders: read(chain.answerHeaders),
+    isAncestor: read(chain.isAncestor), bestOfferedHeader: read(chain.bestOfferedHeader), hasBestWork: read(chain.hasBestWork),
   };
 }
 

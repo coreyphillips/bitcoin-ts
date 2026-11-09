@@ -138,6 +138,25 @@ export class Chain {
     return entry;
   }
 
+  isAncestor(hash: string, descendant: string): boolean {
+    const a = this.entries.get(hash);
+    const b = this.entries.get(descendant);
+    return !!a && !!b && a.height <= b.height && this.ancestor(b, a.height) === a;
+  }
+
+  /** Select the most-work validated header a connected peer says it can serve. */
+  bestOfferedHeader(hashes: Iterable<string>): string | undefined {
+    let best: Entry | undefined;
+    for (const hash of hashes) {
+      const entry = this.entries.get(hash);
+      if (!entry || entry.failed || entry.work <= this.head.work) continue;
+      if (!best || entry.work > best.work || (entry.work === best.work && entry === this.highest)) best = entry;
+    }
+    return best?.header.hash;
+  }
+
+  hasBestWork(): boolean { return this.head.work >= this.highest.work; }
+
   locator(fromHash?: string): string[] {
     const hashes: string[] = [];
     let entry = fromHash === undefined ? this.head : this.entries.get(fromHash);
@@ -172,25 +191,31 @@ export class Chain {
     return headers;
   }
 
-  missingBlocks(limit = Infinity, stopHash?: string): string[] {
+  missingBlocks(limit = Infinity, stopHash?: string, branchHash = this.highest.header.hash, window = Infinity): string[] {
     if (limit !== Infinity && (!Number.isSafeInteger(limit) || limit < 0)) throw new RangeError('invalid block request limit');
-    let entry = this.highest;
+    if (window !== Infinity && (!Number.isSafeInteger(window) || window < 1)) throw new RangeError('invalid block window');
+    let entry = this.entries.get(branchHash);
+    if (!entry || entry.failed) return [];
     const stop = stopHash ? this.entries.get(stopHash) : undefined;
     if (stop && stop.height <= entry.height && this.ancestor(entry, stop.height) === stop) entry = stop;
-    if (this.isActive(entry) || limit <= 0) return [];
-    // Locate the active fork without walking the full unsynchronized header chain.
-    let low = 0;
-    let high = Math.min(this.head.height, entry.height);
-    if (this.ancestor(entry, high) === this.active[high]) low = high;
-    while (low < high) {
-      const mid = Math.ceil((low + high) / 2);
-      if (this.ancestor(entry, mid) === this.active[mid]) low = mid;
-      else high = mid - 1;
+    if (entry.linked || !limit) return [];
+
+    // Linked entries have every body back to genesis. Locate the first gap on this branch,
+    // including during a reorg where earlier fork bodies have already arrived.
+    let low = Math.min(this.head.height, entry.height);
+    if (!this.ancestor(entry, low).linked) low = 0;
+    if (this.ancestor(entry, low + 1).linked) {
+      let high = entry.height - 1;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (this.ancestor(entry, mid).linked) low = mid;
+        else high = mid - 1;
+      }
     }
+    const last = Math.min(entry.height, low + window);
     const missing: string[] = [];
-    // A peer may have delivered a later body first. Walk each window in ascending order.
-    for (let start = low + 1; start <= entry.height && missing.length < limit;) {
-      const end = Math.min(entry.height, start + Math.min(2048, limit - missing.length) - 1);
+    for (let start = low + 1; start <= last && missing.length < limit;) {
+      const end = Math.min(last, start + Math.min(2048, limit - missing.length) - 1);
       let cursor = this.ancestor(entry, end);
       const batch: string[] = [];
       while (cursor.height >= start) {

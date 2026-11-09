@@ -2,3 +2,4 @@
 export { ChainStore } from './storage.js';
 export { syncPeer, type SyncOptions } from './peer.js';
 export { syncNetwork, type DiscoveryOptions } from './discovery.js';
+export { syncPeers, type PoolOptions } from './pool.js';

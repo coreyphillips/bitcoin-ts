@@ -1,7 +1,7 @@
 {
   "name": "bitcoin-ts",
   "version": "0.1.0",
-  "description": "Bitcoin consensus validation and a single-peer block downloader in TypeScript",
+  "description": "Bitcoin consensus validation and a multi-peer block downloader in TypeScript",
   "type": "module",
   "private": true,
   "license": "MIT",
