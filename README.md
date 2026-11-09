@@ -14,16 +14,29 @@ node dist/cli.js status --network regtest
 
 The status command prints the active block hash, height, cumulative work, UTXO count and UTXO fingerprint. On a fresh regtest database the height is zero and the tip is `0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206`. The test suite includes an end-to-end download and restart using a temporary loopback peer and private data directories.
 
-## Synchronize from a peer
+## Connect and synchronize
 
-The node connects to the one Bitcoin v1 P2P endpoint you specify. Use a peer you trust to offer the best chain, and supply its P2P port. For example, to sync from a separate regtest peer listening on port 28444, run
+Run the node from this directory to discover mainnet peers, download and validate blocks from genesis, and stay connected for new blocks. It stores the chain under `./data/main`.
+
+```sh
+npm start
+```
+
+Use Ctrl+C to stop. Run `npm start` again to resume. To check the saved mainnet tip after stopping, run `node dist/cli.js status --network main`.
+
+For a short first run, the following command discovers a public mainnet peer, validates block 1 and exits at that hash. Use a fresh data directory for this example.
+
+```sh
+node dist/cli.js sync --datadir ./data/first-block --stop-at 00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048
+```
+
+Discovery tries a recently connected peer first. If it needs new addresses, it queries the network's DNS seeds for IPv4 and IPv6 candidates. It downloads from one peer at a time, checks for full block and witness service, and switches peers on connection failure. `sync` exits when it catches up with the selected peer. `--follow` keeps it running and retries discovery if the candidates are exhausted. A fresh sync on mainnet downloads and stores the full block history.
+
+Mainnet, testnet3, testnet4 and default signet support automatic discovery. For example, run `node dist/cli.js sync --network testnet4 --follow`. Regtest, a custom signet challenge, and modified activation heights require an explicit peer. With `--connect`, the node uses only that endpoint and bypasses discovery. Explicit connections and the status command default to regtest when the network is omitted.
 
 ```sh
 node dist/cli.js sync --network regtest --connect 127.0.0.1:28444 --datadir ./data/regtest
-node dist/cli.js status --network regtest --datadir ./data/regtest
 ```
-
-The first command downloads headers and witness blocks, checks proof of work, validates transactions and scripts, and exits when caught up. Add `--follow` to keep the connection open for updates, or `--stop-at <block-hash>` to exit at a specific active tip. A stalled handshake or outstanding request times out after 60 seconds by default. After a disconnect, run the same command to resume.
 
 Available networks are `main`, `testnet3`, `testnet4`, `signet`, and `regtest`. For a custom network configuration, pass an options object, for example `--options '{"testactivationheight":{"segwit":120}}'` on regtest. Supply the same network and options each time you open that data directory.
 
@@ -51,7 +64,7 @@ export function inspectTransaction(raw: Buffer) {
 
 `parseTransaction` requires complete canonical wire framing and throws on a decoding error. `checkTransaction` returns `null` on success or a context-free rejection reason. An input's spending authorization requires its spent outputs and the activation flags. `verifyScript(tx, index, spentOutputs, flags)` performs that check and returns `OK` or a Script error identifier. `Chain.processBlock` also checks spending against the current UTXO set, maturity, amounts, locktimes and subsidies.
 
-The public API includes transaction and block decoding, legacy/SegWit/Taproot signature hashing, ECDSA and Schnorr verification, Merkle roots, Script execution through `verifyScript`, and in-memory chain selection. Amounts in the library use `bigint` satoshis. Hash functions return wire-order bytes. `displayHash` formats them for comparison with Bitcoin Core. For a disk-backed chain in an application, import `ChainStore` and `syncPeer` from `bitcoin-ts/node` and call `store.close()` when finished.
+The public API includes transaction and block decoding, legacy/SegWit/Taproot signature hashing, ECDSA and Schnorr verification, Merkle roots, Script execution through `verifyScript`, and in-memory chain selection. Amounts in the library use `bigint` satoshis. Hash functions return wire-order bytes. `displayHash` formats them for comparison with Bitcoin Core. For a disk-backed chain in an application, import `ChainStore` from `bitcoin-ts/node`. Call `await syncNetwork(store)` for discovery or `await syncPeer(store, address)` for a specific endpoint, then call `store.close()` when finished. Both functions are exported from `bitcoin-ts/node`.
 
 ## Conformance
 
@@ -67,4 +80,4 @@ The eight vector suites cover 337,984 checks, including the flag combinations fo
 
 ## Scope
 
-This release targets consensus validation and block download. Wallets, key management, mining, mempool policy, transaction broadcasting, inbound peer service and peer discovery are outside its scope. Full mainnet synchronization, public-peer header synchronization and the live Bitcoin Core interoperability suite remain unverified for this release.
+This release targets consensus validation and block download. Wallets, key management, mining, mempool policy, transaction broadcasting, and inbound peer service are outside its scope. A public mainnet smoke test discovered a peer and validated block 1. Full mainnet synchronization and the live Bitcoin Core interoperability suite remain unverified for this release.

@@ -5,20 +5,23 @@ import { hex, integer, networkName, networkOptions } from './input.js';
 
 const help = `bitcoin-ts
 
+  bitcoin-ts                  Discover mainnet peers, sync and follow the chain
   bitcoin-ts harness
   bitcoin-ts tx <serialized-transaction-hex>
   bitcoin-ts status [--network NAME] [--datadir PATH] [--options JSON]
-  bitcoin-ts sync --connect HOST[:PORT] [--network NAME] [--datadir PATH]
+  bitcoin-ts sync [--connect HOST[:PORT]] [--network NAME] [--datadir PATH]
                   [--stop-at HASH | --follow] [--timeout SECONDS] [--options JSON]
 
-Networks: regtest (default), main, testnet3, testnet4, signet.
+Networks: main, testnet3, testnet4, signet, regtest.
+Automatic sync defaults to main. Status and explicit --connect default to regtest.
 State defaults to ./data/<network>. Use the same options when reopening a directory.
-Sync exits when caught up. --follow waits for announcements on the connected peer.
+Public networks discover peers automatically. Regtest and custom networks require --connect.
+Sync exits when caught up. --follow stays connected and retries discovered peers after a disconnect.
 `;
 
 async function main(args: string[]) {
-  const [command, ...rest] = args;
-  if (!command || command === '--help' || command === '-h' || command === 'help') {
+  const [command, ...rest] = args.length ? args : ['sync', '--follow'];
+  if (command === '--help' || command === '-h' || command === 'help') {
     process.stdout.write(help);
     return;
   }
@@ -46,29 +49,50 @@ async function main(args: string[]) {
   }
   if (command !== 'sync' && command !== 'status') throw new Error(`Unknown command ${command}. Run bitcoin-ts --help`);
   const { values } = parseArgs({ args: rest, options: {
-    network: { type: 'string', default: 'regtest' }, datadir: { type: 'string' },
+    network: { type: 'string' }, datadir: { type: 'string' },
     options: { type: 'string', default: '{}' }, connect: { type: 'string' },
     'stop-at': { type: 'string' }, follow: { type: 'boolean' }, timeout: { type: 'string' },
   }});
-  const network = networkName(values.network);
+  const automatic = command === 'sync' && values.connect === undefined;
+  const network = networkName(values.network ?? (automatic ? 'main' : 'regtest'));
   const opts = networkOptions(JSON.parse(values.options!), network);
-  if (command === 'sync' && !values.connect) throw new Error('sync requires --connect HOST[:PORT]');
   if (command === 'status' && [values.connect, values['stop-at'], values.follow, values.timeout].some(x => x !== undefined)) {
     throw new Error('Connection options apply only to sync');
   }
   const stopAt = values['stop-at'] === undefined ? undefined : hex(values['stop-at'], 'stop-at', 32).toString('hex');
   if (stopAt && values.follow) throw new Error('Choose --stop-at or --follow');
   const timeout = integer(Number(values.timeout ?? 60), 'timeout seconds', 1, 86400) * 1000;
+  if (automatic) {
+    const { requireSeedHosts } = await import('./seeds.js');
+    const { networkParams } = await import('./params.js');
+    requireSeedHosts(networkParams(network, opts));
+  }
   const { ChainStore } = await import('./storage.js');
   const store = new ChainStore(resolve(values.datadir ?? `data/${network}`), network, opts);
   try {
     if (command === 'sync') {
-      const { syncPeer } = await import('./peer.js');
-      await syncPeer(store, values.connect!, { stopAt, follow: values.follow, timeout,
-        onTip(hash, height) {
-          if (values.follow || height % 1000 === 0) console.log(JSON.stringify({ event: 'tip', tip: hash, height }));
+      const syncOptions = { stopAt, follow: values.follow, timeout,
+        onTip(hash: string, height: number) {
+          if (height === 1 || height % 1000 === 0 || (values.follow && height === store.chain.bestHeader().height)) {
+            console.log(JSON.stringify({ event: 'tip', tip: hash, height }));
+          }
         },
-      });
+      };
+      if (automatic) {
+        const { syncNetwork } = await import('./discovery.js');
+        await syncNetwork(store, {
+          ...syncOptions,
+          onPeer(address, state, reason) {
+            console.error(`Peer ${address} ${state}${reason ? ': ' + reason : ''}`);
+          },
+          onRetry(delay, reason) {
+            console.error(`${reason}. Retrying peer discovery in ${delay / 1000}s`);
+          },
+        });
+      } else {
+        const { syncPeer } = await import('./peer.js');
+        await syncPeer(store, values.connect!, syncOptions);
+      }
     }
     console.log(JSON.stringify({ ...(command === 'sync' ? { event: 'stopped' } : {}), network,
       ...store.chain.tip(), ...store.chain.utxoHash() }));

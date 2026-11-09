@@ -2,17 +2,37 @@ import { createConnection, isIP } from 'node:net';
 import { hash256 } from './codec.js';
 import type { ChainStore } from './storage.js';
 import {
-  FrameReader, blockInventory, checkVersion, displayHash, frame, getBlocks,
+  FrameReader, PeerConnectionError, blockInventory, checkVersion, displayHash, frame, getBlocks,
   getHeaders, readHeaders, readLocator, versionMessage, writeHeaders,
 } from './wire.js';
+
+export { PeerConnectionError } from './wire.js';
 
 export interface SyncOptions {
   stopAt?: string;
   follow?: boolean;
   /** Milliseconds allowed for a handshake, request, or a target without progress. */
   timeout?: number;
+  /** Restrict automatic downloads to archival nodes that serve witness data. */
+  requireFullNode?: boolean;
+  onReady?: () => void;
   onTip?: (hash: string, height: number) => void;
 }
+
+// Only errors decoding remote message bytes belong to the peer. Storage and caller callbacks
+// run outside this boundary so failures there stop automatic synchronization immediately.
+function decodePayload<T>(decode: () => T): T {
+  try { return decode(); }
+  catch (error) {
+    throw new PeerConnectionError(error instanceof Error ? error.message : String(error), { cause: error });
+  }
+}
+
+const transportErrors = new Set([
+  'ECONNABORTED', 'ECONNREFUSED', 'ECONNRESET', 'EHOSTDOWN', 'EHOSTUNREACH',
+  'ENETDOWN', 'ENETRESET', 'ENETUNREACH', 'EPIPE', 'ETIMEDOUT', 'ENOTFOUND',
+  'EAI_AGAIN', 'ERR_SOCKET_CLOSED', 'ERR_SOCKET_CONNECTION_TIMEOUT',
+]);
 
 function endpoint(address: string, defaultPort: number) {
   // Bare IPv6 uses the default port. Use [IPv6]:port for a non-default port.
@@ -40,6 +60,8 @@ export async function syncPeer(store: ChainStore, address: string, options: Sync
   return new Promise<void>((resolve, reject) => {
     const socket = createConnection({ ...peer, noDelay: true });
     let handshake: 'version' | 'verack' | 'ready' = 'version';
+    // A stale DNS address should give another candidate a turn promptly.
+    const handshakeTimeout = options.requireFullNode ? Math.min(timeout, 10_000) : timeout;
     let finished = false;
     let lastProgress = performance.now();
     let lastHeadersRequest = lastProgress;
@@ -51,24 +73,24 @@ export async function syncPeer(store: ChainStore, address: string, options: Sync
       try { checkDeadlines(); } catch (error) { finish(error); }
     }, Math.min(1000, timeout));
 
-    function finish(error?: unknown) {
+    function finish(...failure: [] | [unknown]) {
       if (finished) return;
       finished = true;
       clearInterval(timer);
       socket.destroy();
-      if (error !== undefined) reject(error);
+      if (failure.length) reject(failure[0]);
       else resolve();
     }
 
     function send(command: string, payload?: Buffer) {
       // Bound pending writes even when a peer floods us with requests without reading replies.
-      if (socket.writableLength > 4_000_000) throw new Error('Peer is not reading responses');
+      if (socket.writableLength > 4_000_000) throw new PeerConnectionError('Peer is not reading responses');
       socket.write(frame(magic, command, payload));
     }
 
     function requestHeaders(from = chain.bestHeader().hash) {
       if (awaitingHeaders) return;
-      send('getheaders', getHeaders(chain.locator(from)));
+      send('getheaders', getHeaders(chain.locator(from), target));
       locatorStart = from;
       awaitingHeaders = true;
       headersSynced = false;
@@ -91,36 +113,42 @@ export async function syncPeer(store: ChainStore, address: string, options: Sync
     function checkDeadlines() {
       const now = performance.now();
       if (handshake !== 'ready') {
-        if (now - lastProgress >= timeout) throw new Error('Timed out completing peer handshake');
+        if (now - lastProgress >= handshakeTimeout) throw new PeerConnectionError('Timed out completing peer handshake');
         return;
       }
-      if (awaitingHeaders && now - lastHeadersRequest >= timeout) throw new Error('Timed out waiting for headers');
+      if (awaitingHeaders && now - lastHeadersRequest >= timeout) throw new PeerConnectionError('Timed out waiting for headers');
       for (const start of inFlight.values()) {
-        if (now - start >= timeout) throw new Error('Timed out waiting for a requested block');
+        if (now - start >= timeout) throw new PeerConnectionError('Timed out waiting for a requested block');
       }
-      if (target && now - lastProgress >= timeout) throw new Error('Peer made no synchronization progress');
+      if (target && now - lastProgress >= timeout) throw new PeerConnectionError('Peer made no synchronization progress');
       if ((target || options.follow) && !awaitingHeaders && now - lastHeadersRequest >= 10_000) requestHeaders();
     }
 
     function receive(command: string, payload: Buffer) {
       // We advertise 70016. The feature negotiation message was introduced in 70017.
-      if (command === 'feature') throw new Error('Unsupported feature negotiation');
+      if (command === 'feature') throw new PeerConnectionError('Unsupported feature negotiation');
       if (handshake === 'ready' && (command === 'wtxidrelay' || command === 'sendaddrv2')) {
-        throw new Error('Late peer negotiation message: ' + command);
+        throw new PeerConnectionError('Late peer negotiation message: ' + command);
       }
       if (command === 'version') {
-        if (handshake !== 'version') throw new Error('Duplicate peer version');
-        checkVersion(payload, version.nonce);
+        if (handshake !== 'version') throw new PeerConnectionError('Duplicate peer version');
+        const services = decodePayload(() => checkVersion(payload, version.nonce));
+        const fullNodeServices = 1n | 8n; // NODE_NETWORK and NODE_WITNESS
+        if (options.requireFullNode && (services & fullNodeServices) !== fullNodeServices) {
+          throw new PeerConnectionError('Peer does not advertise full block and witness service');
+        }
         send('sendheaders');
         send('verack');
         handshake = 'verack';
         return;
       }
       if (command === 'verack') {
-        if (handshake !== 'verack') throw new Error('Unexpected peer verack');
+        if (handshake !== 'verack') throw new PeerConnectionError('Unexpected peer verack');
         handshake = 'ready';
         lastProgress = performance.now();
+        options.onReady?.();
         requestHeaders();
+        scheduleBlocks();
         return;
       }
       if (handshake !== 'ready') return;
@@ -129,41 +157,41 @@ export async function syncPeer(store: ChainStore, address: string, options: Sync
           if (payload.length === 8) send('pong', payload);
           break;
         case 'getheaders': {
-          const { locator, stop } = readLocator(payload);
+          const { locator, stop } = decodePayload(() => readLocator(payload));
           const headers = chain.answerHeaders(locator, stop);
           if (headers) send('headers', writeHeaders(headers));
           break;
         }
         case 'inv':
-          if (blockInventory(payload).some(hash => !chain.hasHeader(hash))) requestHeaders();
+          if (decodePayload(() => blockInventory(payload)).some(hash => !chain.hasHeader(hash))) requestHeaders();
           break;
         case 'notfound':
-          if (blockInventory(payload).some(hash => inFlight.has(hash))) throw new Error('Peer cannot serve a requested block');
+          if (decodePayload(() => blockInventory(payload)).some(hash => inFlight.has(hash))) throw new PeerConnectionError('Peer cannot serve a requested block');
           break;
         case 'headers': {
-          const headers = readHeaders(payload);
+          const headers = decodePayload(() => readHeaders(payload));
           const before = chain.bestHeader().hash;
           const result = store.headers(headers, Math.floor(Date.now() / 1000));
-          if (result.result !== 'accepted') throw new Error('Peer sent rejected headers: ' + (result.reason ?? result.result));
+          if (result.result !== 'accepted') throw new PeerConnectionError('Peer sent rejected headers: ' + (result.reason ?? result.result));
           if (chain.bestHeader().hash !== before) lastProgress = performance.now();
           awaitingHeaders = false;
-          headersSynced = headers.length < 2000;
-          if (!headersSynced) {
-            const last = displayHash(hash256(headers[headers.length - 1]));
-            if (last === locatorStart) throw new Error('Peer repeated a full headers batch');
+          const last = headers.length ? displayHash(hash256(headers[headers.length - 1])) : undefined;
+          headersSynced = headers.length < 2000 || (target !== undefined && last === target);
+          scheduleBlocks();
+          if (!headersSynced && last) {
+            if (last === locatorStart) throw new PeerConnectionError('Peer repeated a full headers batch');
             requestHeaders(last);
           }
-          scheduleBlocks();
           break;
         }
         case 'block': {
-          if (payload.length < 80) throw new Error('Peer sent a truncated block');
+          if (payload.length < 80) throw new PeerConnectionError('Peer sent a truncated block');
           const hash = displayHash(hash256(payload.subarray(0, 80)));
           const requested = inFlight.delete(hash);
           const before = chain.tip().tip;
           const result = store.block(payload, Math.floor(Date.now() / 1000), requested);
           if (result.result !== 'accepted' && result.result !== 'duplicate') {
-            throw new Error('Peer block ' + hash + ' rejected: ' + (result.reason ?? result.result));
+            throw new PeerConnectionError('Peer block ' + hash + ' rejected: ' + (result.reason ?? result.result));
           }
           if (before !== result.tip) {
             lastProgress = performance.now();
@@ -178,8 +206,11 @@ export async function syncPeer(store: ChainStore, address: string, options: Sync
     socket.once('connect', () => {
       try { send('version', version.bytes); } catch (error) { finish(error); }
     });
-    socket.on('error', finish);
-    socket.once('close', () => finish(new Error('Peer closed the connection')));
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code && transportErrors.has(error.code)) finish(new PeerConnectionError(error.message, { cause: error }));
+      else finish(error);
+    });
+    socket.once('close', () => finish(new PeerConnectionError('Peer closed the connection')));
     socket.on('data', chunk => {
       try {
         for (const { command, payload } of frames.push(chunk)) {

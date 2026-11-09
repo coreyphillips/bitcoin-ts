@@ -36,6 +36,7 @@ export class ChainStore {
     try {
       this.#db.exec('PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL; BEGIN EXCLUSIVE');
       const backend = new SqliteBackend(this.#db, JSON.stringify({ format: 1, network, options: config }));
+      this.#db.exec('CREATE TABLE IF NOT EXISTS peers (address TEXT NOT NULL UNIQUE)');
       this.#state = new Chain(network, config, backend);
       this.chain = queries(this.#state, () => this.requireOpen());
       this.#db.exec('COMMIT');
@@ -62,6 +63,24 @@ export class ChainStore {
       this.close();
       throw error;
     }
+  }
+
+  /** Recently handshaken public peers, most recent first. Each database belongs to one network. */
+  knownPeers(): string[] {
+    this.requireOpen();
+    return this.#db.prepare('SELECT address FROM peers ORDER BY rowid DESC LIMIT 16').all().map(row => String(row.address));
+  }
+
+  rememberPeer(address: string) {
+    this.update(() => {
+      this.#db.prepare('INSERT OR REPLACE INTO peers(address) VALUES (?)').run(address);
+      this.#db.exec('DELETE FROM peers WHERE rowid NOT IN (SELECT rowid FROM peers ORDER BY rowid DESC LIMIT 16)');
+    });
+  }
+
+  forgetPeer(address: string) {
+    this.requireOpen();
+    this.#db.prepare('DELETE FROM peers WHERE address=?').run(address);
   }
 
   headers(headers: Buffer[], now: number) {

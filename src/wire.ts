@@ -5,6 +5,11 @@ export const VERSION = 70016;
 export const MAX_PAYLOAD = 4_000_000;
 export const WITNESS_BLOCK = 0x40000002;
 const empty = Buffer.alloc(0);
+
+export class PeerConnectionError extends Error {
+  override name = 'PeerConnectionError';
+}
+
 export function displayHash(raw: Buffer): string { return Buffer.from(raw).reverse().toString('hex'); }
 export function wireHash(hash: string): Buffer { return Buffer.from(hash, 'hex').reverse(); }
 
@@ -35,9 +40,9 @@ export class FrameReader {
       pos += count;
       if (this.offset < target.length) break;
       if (!this.payload) {
-        if (!this.header.subarray(0, 4).equals(this.magic)) throw new Error('Wrong Bitcoin network magic');
+        if (!this.header.subarray(0, 4).equals(this.magic)) throw new PeerConnectionError('Wrong Bitcoin network magic');
         const size = this.header.readUInt32LE(16);
-        if (size > MAX_PAYLOAD) throw new Error('Peer message too large');
+        if (size > MAX_PAYLOAD) throw new PeerConnectionError('Peer message too large');
         this.payload = Buffer.allocUnsafe(size);
         this.offset = 0;
         if (size) continue;
@@ -62,7 +67,8 @@ export function versionMessage(height: number) {
 export function checkVersion(payload: Buffer, nonce: Buffer) {
   const r = new Reader(payload);
   if (r.i32() < 31800) throw new Error('Peer protocol version is too old');
-  r.read(8 + 8 + 26);
+  const services = r.u64();
+  r.read(8 + 26);
   if (r.offset < payload.length) {
     r.read(26);
     if (r.read(8).equals(nonce)) throw new Error('Peer connection is a self connection');
@@ -70,6 +76,7 @@ export function checkVersion(payload: Buffer, nonce: Buffer) {
   if (r.offset < payload.length && r.varBytes().length > 256) throw new Error('Peer user agent is too long');
   if (r.offset < payload.length) r.i32();
   if (r.offset < payload.length) r.u8();
+  return services;
 }
 
 export function readHeaders(payload: Buffer): Buffer[] {
