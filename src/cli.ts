@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { hex, integer, networkName, networkOptions } from './input.js';
 import { DEFAULT_MAX_PEERS, MAX_PEERS, syncPeers } from './pool.js';
+import { DEFAULT_SCRIPT_THREADS, MAX_SCRIPT_THREADS } from './script-pool.js';
 
 const help = `bitcoin-ts
 
@@ -11,7 +12,7 @@ const help = `bitcoin-ts
   bitcoin-ts tx <serialized-transaction-hex>
   bitcoin-ts status [--network NAME] [--datadir PATH] [--options JSON]
   bitcoin-ts sync [--connect HOST[:PORT]]... [--max-peers N] [--network NAME] [--datadir PATH]
-                  [--stop-at HASH | --follow] [--timeout SECONDS] [--options JSON]
+                  [--script-threads N] [--stop-at HASH | --follow] [--timeout SECONDS] [--options JSON]
 
 Networks: main, testnet3, testnet4, signet, regtest.
 Automatic sync defaults to main. Status and explicit --connect default to regtest.
@@ -19,6 +20,7 @@ State defaults to ./data/<network>. Use the same options when reopening a direct
 Public networks discover peers automatically. Regtest and custom networks require --connect.
 Sync maintains up to ${DEFAULT_MAX_PEERS} outbound peers by default. Use --max-peers 1..${MAX_PEERS} to set the limit.
 Repeat --connect to use a fixed set of peers. --follow keeps following the chain after sync.
+Set --script-threads 1..${MAX_SCRIPT_THREADS} to choose the verification thread count. The default here is ${DEFAULT_SCRIPT_THREADS}.
 `;
 
 async function main(args: string[]) {
@@ -54,13 +56,17 @@ async function main(args: string[]) {
     network: { type: 'string' }, datadir: { type: 'string' },
     options: { type: 'string', default: '{}' }, connect: { type: 'string', multiple: true }, 'max-peers': { type: 'string' },
     'stop-at': { type: 'string' }, follow: { type: 'boolean' }, timeout: { type: 'string' },
+    'script-threads': { type: 'string' },
   }});
   const automatic = command === 'sync' && values.connect === undefined;
   const network = networkName(values.network ?? (automatic ? 'main' : 'regtest'));
   const opts = networkOptions(JSON.parse(values.options!), network);
-  if (command === 'status' && [values.connect, values['stop-at'], values.follow, values.timeout, values['max-peers']].some(x => x !== undefined)) {
-    throw new Error('Connection options apply only to sync');
+  const syncOnly = [values.connect, values['stop-at'], values.follow, values.timeout, values['max-peers'], values['script-threads']];
+  if (command === 'status' && syncOnly.some(x => x !== undefined)) {
+    throw new Error('Peer and verification options apply only to sync');
   }
+  const scriptThreads = values['script-threads'] === undefined ? undefined
+    : integer(Number(values['script-threads']), 'script-threads', 1, MAX_SCRIPT_THREADS);
   const maxPeers = integer(Number(values['max-peers'] ?? DEFAULT_MAX_PEERS), 'max-peers', 1, MAX_PEERS);
   const stopAt = values['stop-at'] === undefined ? undefined : hex(values['stop-at'], 'stop-at', 32).toString('hex');
   if (stopAt && values.follow) throw new Error('Choose --stop-at or --follow');
@@ -71,7 +77,7 @@ async function main(args: string[]) {
     requireSeedHosts(networkParams(network, opts));
   }
   const { ChainStore } = await import('./storage.js');
-  const store = new ChainStore(resolve(values.datadir ?? `data/${network}`), network, opts);
+  const store = new ChainStore(resolve(values.datadir ?? `data/${network}`), network, opts, { scriptThreads });
   try {
     if (command === 'sync') {
       const syncOptions = { stopAt, follow: values.follow, timeout,

@@ -38,6 +38,10 @@ Discovery starts with cached peers and fills vacant slots using the network's IP
 node dist/cli.js sync --network testnet4 --max-peers 4 --follow
 ```
 
+The node checks spending scripts and their ECDSA and Schnorr signatures across CPU threads. By default it uses the number of CPUs available to Node.js, capped at eight. The count includes the calling thread. Blocks with few inputs stay on that thread to avoid worker overhead. The node applies a block's UTXO changes only after all its inputs pass verification.
+
+Use `--script-threads N` to choose 1 to 16 total verification threads independently of the peer count. For example, `node dist/cli.js sync --network testnet4 --script-threads 4 --follow` uses four for sufficiently large blocks. A value of 1 selects serial verification. You can change this setting when resuming an existing database.
+
 Use `sync` for a one-time download. It waits for the connected peers' header replies and for the active chain to reach the best known header work. `--stop-at` exits as soon as the requested hash becomes the active tip. `--follow` keeps the pool running and fills vacancies as peers leave. A fresh mainnet sync downloads and stores the full block history.
 
 Mainnet, testnet3, testnet4 and default signet support discovery. Regtest, a custom signet challenge, and modified activation heights require explicit peers. Repeat `--connect` to provide a fixed list. The node bypasses DNS, and extra endpoints above the connection limit serve as standbys. For example, if you operate two regtest peers on ports 28444 and 28445, run
@@ -75,6 +79,8 @@ export function inspectTransaction(raw: Buffer) {
 `parseTransaction` requires complete canonical wire framing and throws on a decoding error. `checkTransaction` returns `null` on success or a context-free rejection reason. An input's spending authorization requires its spent outputs and the activation flags. `verifyScript(tx, index, spentOutputs, flags)` performs that check and returns `OK` or a Script error identifier. `Chain.processBlock` also checks spending against the current UTXO set, maturity, amounts, locktimes and subsidies.
 
 The public API includes transaction and block decoding, legacy/SegWit/Taproot signature hashing, ECDSA and Schnorr verification, Merkle roots, Script execution through `verifyScript`, and in-memory chain selection. Amounts in the library use `bigint` satoshis. Hash functions return wire-order bytes. `displayHash` formats them for comparison with Bitcoin Core. For a disk-backed chain in an application, import `ChainStore` from `bitcoin-ts/node`. Call `await syncNetwork(store, { maxPeers: 8 })` for discovery, `await syncPeers(store, addresses)` for a fixed set, or `await syncPeer(store, address)` for one endpoint. All three functions are exported from `bitcoin-ts/node`. Pass an `AbortSignal` as the `signal` option to cancel a running sync. Close the store after the promise settles.
+
+To set a CPU limit in a Node.js application, open the database with `new ChainStore(directory, network, {}, { scriptThreads: 4 })`. The third argument holds the network options and the fourth holds runtime settings. The standalone `verifyScript` call and the default in-memory `Chain` use the calling thread.
 
 ## Conformance
 

@@ -4,8 +4,9 @@ import { sha256, u32le } from './codec.js';
 import { scriptMessages } from './block-errors.js';
 import { blockFlags, type NetworkParams } from './params.js';
 import { BlockFailure } from './pow.js';
-import { SighashCache } from './sighash.js';
-import { transactionSigOpCost, verifyScript } from './script.js';
+import { transactionSigOpCost } from './script.js';
+import { verifyChecks, type ScriptCheck } from './script-checks.js';
+import type { ScriptPool } from './script-pool.js';
 import { MAX_MONEY, serializeOutput, type Transaction, type TxOutput } from './tx.js';
 
 export interface Coin {
@@ -62,7 +63,7 @@ export function applyChanges(utxo: CoinView, changes: Changes): void {
 
 export function connectBlock(
   block: Block, height: number, parentMtp: number, mtpAt: (h: number) => number,
-  utxo: CoinView, params: NetworkParams, onBip34Chain: boolean,
+  utxo: CoinView, params: NetworkParams, onBip34Chain: boolean, scripts?: ScriptPool,
 ): Changes {
   const changes: Changes = new Map();
   const flags = blockFlags(params, block.header.hash, height);
@@ -76,7 +77,7 @@ export function connectBlock(
   }
   let fees = 0n;
   let sigops = 0;
-  const scriptChecks: { tx: Transaction; spent: TxOutput[] }[] = [];
+  const scriptChecks: ScriptCheck[] = [];
   for (let i = 0; i < block.transactions.length; i++) {
     const tx = block.transactions[i];
     const spent: TxOutput[] = [];
@@ -115,13 +116,8 @@ export function connectBlock(
   }
   const reward = 5000000000n >> BigInt(Math.floor(height / params.halving));
   if (outputTotal(block.transactions[0]) > reward + fees) invalid('bad-cb-amount');
-  for (const { tx, spent } of scriptChecks) {
-    const cache = new SighashCache(tx, spent);
-    for (let i = 0; i < spent.length; i++) {
-      const error = verifyScript(tx, i, spent, flags, cache);
-      if (error !== 'OK') invalid(`block-script-verify-flag-failed (${scriptMessages[error] ?? error})`);
-    }
-  }
+  const error = scripts ? scripts.verify(scriptChecks, flags) : verifyChecks(scriptChecks, flags);
+  if (error !== 'OK') invalid(`block-script-verify-flag-failed (${scriptMessages[error] ?? error})`);
   const undo: Changes = new Map();
   for (const outpoint of changes.keys()) undo.set(outpoint, utxo.get(outpoint));
   // Core's historical duplicate coinbases replaced the earlier outputs permanently.

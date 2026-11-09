@@ -4,6 +4,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { Chain } from './chain.js';
 import { networkName, networkOptions } from './input.js';
 import { SqliteBackend } from './sqlite-backend.js';
+import { ScriptPool } from './script-pool.js';
+
+export interface ChainStoreOptions {
+  /** Total script verification threads including the calling thread. Use 1 for serial execution. */
+  scriptThreads?: number;
+}
 
 function queries(chain: Chain, requireOpen: () => void) {
   // Callers may retain this view even after a failed write closes the store.
@@ -27,18 +33,20 @@ export class ChainStore {
   readonly chain: ReturnType<typeof queries>;
   readonly #state: Chain;
   readonly #db: DatabaseSync;
+  readonly #scripts: ScriptPool;
   #open = true;
 
-  constructor(directory: string, network: string, options: object = {}) {
+  constructor(directory: string, network: string, options: object = {}, runtime: ChainStoreOptions = {}) {
     networkName(network);
     const config = networkOptions(options, network);
+    this.#scripts = new ScriptPool(runtime.scriptThreads);
     mkdirSync(directory, { recursive: true });
     this.#db = new DatabaseSync(join(directory, 'chain.sqlite'));
     try {
       this.#db.exec('PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL; BEGIN EXCLUSIVE');
       const backend = new SqliteBackend(this.#db, JSON.stringify({ format: 1, network, options: config }));
       this.#db.exec('CREATE TABLE IF NOT EXISTS peers (address TEXT NOT NULL UNIQUE)');
-      this.#state = new Chain(network, config, backend);
+      this.#state = new Chain(network, config, backend, this.#scripts);
       this.chain = queries(this.#state, () => this.requireOpen());
       this.#db.exec('COMMIT');
     } catch (error) {
@@ -95,6 +103,7 @@ export class ChainStore {
   }
   close() {
     if (this.#open) {
+      this.#scripts.close();
       this.#db.close();
       this.#open = false;
     }

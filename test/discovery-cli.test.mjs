@@ -112,9 +112,18 @@ test('one connection slot discovers alternatives and remembers a peer on restart
 test('an explicit peer bypasses discovery and uses the existing regtest default', async t => {
   const cli = setup(t);
   const { port } = await startPeer(t, 'fabfb5da');
-  const result = await cli.run(port, '--connect', '127.0.0.1:' + port);
+  const result = await cli.run(port, '--connect', '127.0.0.1:' + port, '--script-threads', '2');
   assert.equal(tip(result.stdout), regtestGenesis);
   assert.deepEqual(cli.requests(), [{ host: '127.0.0.1', port }]);
+});
+
+test('invalid verification thread counts fail before opening the chain or dialing peers', async t => {
+  const cli = setup(t);
+  for (const count of ['0', '17', '1.5']) {
+    await assert.rejects(cli.run(0, '--script-threads', count), error => error.code === 1 && error.stderr.includes('script-threads'));
+    assert.deepEqual(cli.requests(), []);
+    assert.equal(existsSync(join(cli.dir, 'chain')), false);
+  }
 });
 
 test('private networks require an explicit peer without consulting public DNS', async t => {

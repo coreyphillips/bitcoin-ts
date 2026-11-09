@@ -1,4 +1,4 @@
-import { hash256, merkleRoot, serializeTransaction, txid } from '../../dist/index.js';
+import { hash256, merkleRoot, serializeTransaction, txid, wtxid } from '../../dist/index.js';
 import { pushScriptNumber } from '../../dist/script.js';
 
 export function mineBlock(parent, height, tag, spends = []) {
@@ -8,6 +8,14 @@ export function mineBlock(parent, height, tag, spends = []) {
       script: Buffer.concat([pushScriptNumber(height), Buffer.of(tag)]), witness: [] }],
     outputs: [{ value: 5_000_000_000n, script: Buffer.of(0x51) }],
   };
+  if (spends.some(tx => tx.inputs.some(input => input.witness.length))) {
+    const reserved = Buffer.alloc(32);
+    coinbase.inputs[0].witness = [reserved];
+    const root = merkleRoot([Buffer.alloc(32), ...spends.map(wtxid)]).root;
+    coinbase.outputs.push({ value: 0n, script: Buffer.concat([
+      Buffer.from('6a24aa21a9ed', 'hex'), hash256(Buffer.concat([root, reserved])),
+    ]) });
+  }
   const txs = [coinbase, ...spends];
   const header = Buffer.alloc(80);
   header.writeInt32LE(4, 0);

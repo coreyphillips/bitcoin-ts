@@ -3,6 +3,7 @@ import { applyChanges, connectBlock, utxoFingerprint } from './coins.js';
 import { MemoryBackend, type ChainBackend, type ChainRecord } from './chain-backend.js';
 import { networkParams, type NetworkOptions } from './params.js';
 import { BlockFailure, blockProof, checkHeaderContext, parseHeader, validProof, type Header } from './pow.js';
+import type { ScriptPool } from './script-pool.js';
 
 interface Entry {
   header: Header;
@@ -49,7 +50,10 @@ export class Chain {
   private highest: Entry;
   private sequence = 1;
 
-  constructor(network: string, options: NetworkOptions = {}, backend: ChainBackend = new MemoryBackend()) {
+  constructor(
+    network: string, options: NetworkOptions = {}, backend: ChainBackend = new MemoryBackend(),
+    private readonly scripts?: ScriptPool,
+  ) {
     this.backend = backend;
     this.params = networkParams(network, options);
     const header = parseHeader(this.params.genesis);
@@ -415,7 +419,8 @@ export class Chain {
           const hash = entry.header.hash;
           const block = recent?.header.hash === hash ? recent : parseBlock(this.backend.getBlock(hash));
           if (block.header.hash !== hash) throw new Error('Stored block hash mismatch');
-          const undo = connectBlock(block, entry.height, this.head.mtp, h => this.active[h].mtp, this.backend.coins, this.params, onBip34Chain);
+          const undo = connectBlock(block, entry.height, this.head.mtp, h => this.active[h].mtp,
+            this.backend.coins, this.params, onBip34Chain, this.scripts);
           this.backend.putUndo(hash, undo);
         } catch (error) {
           if (!(error instanceof BlockFailure)) throw error;
