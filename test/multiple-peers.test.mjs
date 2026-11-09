@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { mineBlock } from './fixtures/mine-block.mjs';
@@ -176,6 +178,41 @@ test('aborting follow mode closes every socket and preserves the active tip', as
   await Promise.all(closed);
   assert.equal(acknowledged.size, 2);
   assert.equal(store.chain.tip().tip, genesis);
+});
+
+test('following a peer commits the last block on Ctrl+C and while idle', { timeout: 8000 }, async t => {
+  const chain = branch(1);
+  const endpoint = await serve(t, chain);
+  for (const signal of ['SIGINT', 'SIGKILL']) {
+    const dir = directory(t);
+    const child = spawn(process.execPath, [cli, 'sync', '--datadir', dir, '--connect', endpoint, '--follow'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const ended = once(child, 'exit');
+    const lines = createInterface({ input: child.stdout });
+    try {
+      const [line] = await Promise.race([
+        once(lines, 'line'),
+        ended.then(([code, signal]) => { throw new Error(`CLI exited before reaching the tip (${code ?? signal})`); }),
+      ]);
+      assert.equal(JSON.parse(line).tip, chain[0].hash);
+      // Kill the second process abruptly after the periodic commit, with no intervening writes.
+      if (signal === 'SIGKILL') await delay(1250);
+      child.kill(signal);
+      const [code, exitSignal] = await ended;
+      if (signal === 'SIGINT') assert.equal(code, 130);
+      else assert.equal(exitSignal, signal);
+    } finally {
+      lines.close();
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await ended;
+    }
+    const reopened = new ChainStore(dir, 'regtest');
+    try {
+      assert.equal(reopened.chain.tip().tip, chain[0].hash);
+      assert.equal(reopened.chain.utxoHash().txouts, 1);
+    } finally { reopened.close(); }
+  }
 });
 
 test('bounded sync fails if all responsive peers lack the requested target', { timeout: 5000 }, async t => {

@@ -1,5 +1,8 @@
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { Reader, taggedHash, varBytes } from './codec.js';
+import { nativeVerifier } from './native-crypto.js';
+
+export const signatureBackend = nativeVerifier ? 'native' : 'js';
 
 const Point = secp256k1.Point;
 
@@ -42,12 +45,18 @@ export function verifyECDSA(pubkey: Buffer, msg32: Buffer, derWithoutType: Buffe
   } else {
     return false;
   }
+  let compact: Buffer;
   try {
     const der = new Reader(derWithoutType);
     if (der.u8() !== 0x30) return false;
     const length = der.u8();
     if ((length & 0x80) !== 0) der.read(length & 0x7f);
-    const compact = Buffer.concat([derInteger(der), derInteger(der)]);
+    compact = Buffer.concat([derInteger(der), derInteger(der)]);
+  } catch {
+    return false;
+  }
+  if (nativeVerifier) return nativeVerifier.verifyECDSA(key, msg32, compact);
+  try {
     return secp256k1.verify(compact, msg32, key, { prehash: false, lowS: false, format: 'compact' });
   } catch {
     return false;
@@ -65,6 +74,7 @@ function liftX(x: Buffer) {
 /** BIP340's challenge commits to the field element r, the public key and the entire message. */
 export function verifySchnorr(pubkey: Buffer, msg: Buffer, sig: Buffer): boolean {
   if (pubkey.length !== 32 || sig.length !== 64) return false;
+  if (nativeVerifier) return nativeVerifier.verifySchnorr(pubkey, msg, sig);
   const r = bigEndian(sig.subarray(0, 32));
   const s = bigEndian(sig.subarray(32));
   if (r >= Point.Fp.ORDER || s >= Point.Fn.ORDER) return false;

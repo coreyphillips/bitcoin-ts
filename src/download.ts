@@ -63,7 +63,8 @@ export class DownloadCoordinator {
     if (!source) return;
     const owner = this.owners.get(hash);
     const before = this.store.chain.tip().tip;
-    const result = this.store.block(bytes, Math.floor(Date.now() / 1000), owner === source);
+    const write = this.store.downloadBlock ?? this.store.block;
+    const result = write.call(this.store, bytes, Math.floor(Date.now() / 1000), owner === source);
     if (result.result !== 'accepted' && result.result !== 'duplicate') {
       // A bad unsolicited copy must leave the original peer's request alive.
       throw new PeerConnectionError(`Peer block ${hash} rejected: ${result.reason ?? result.result}`);

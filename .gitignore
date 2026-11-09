@@ -3,3 +3,4 @@ dist/
 data/
 *.sqlite*
 .DS_Store
+native/build/

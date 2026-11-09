@@ -80,7 +80,12 @@ async function main(args: string[]) {
   const store = new ChainStore(resolve(values.datadir ?? `data/${network}`), network, opts, { scriptThreads });
   try {
     if (command === 'sync') {
-      const syncOptions = { stopAt, follow: values.follow, timeout,
+      const controller = new AbortController();
+      const interrupt = (signal: NodeJS.Signals) => {
+        process.exitCode = signal === 'SIGINT' ? 130 : 143;
+        controller.abort();
+      };
+      const syncOptions = { stopAt, follow: values.follow, timeout, signal: controller.signal,
         onTip(hash: string, height: number) {
           if (height === 1 || height % 1000 === 0 || (values.follow && height === store.chain.bestHeader().height)) {
             console.log(JSON.stringify({ event: 'tip', tip: hash, height }));
@@ -100,11 +105,21 @@ async function main(args: string[]) {
           console.error(`${reason}. Retrying peers in ${delay / 1000}s`);
         },
       };
-      if (automatic) {
-        const { syncNetwork } = await import('./discovery.js');
-        await syncNetwork(store, poolOptions);
-      } else {
-        await syncPeers(store, values.connect!, poolOptions);
+      process.once('SIGINT', interrupt);
+      process.once('SIGTERM', interrupt);
+      try {
+        if (automatic) {
+          const { syncNetwork } = await import('./discovery.js');
+          await syncNetwork(store, poolOptions);
+        } else {
+          await syncPeers(store, values.connect!, poolOptions);
+        }
+      } catch (error) {
+        if (controller.signal.aborted && error === controller.signal.reason) return;
+        throw error;
+      } finally {
+        process.removeListener('SIGINT', interrupt);
+        process.removeListener('SIGTERM', interrupt);
       }
     }
     console.log(JSON.stringify({ ...(command === 'sync' ? { event: 'stopped' } : {}), network,

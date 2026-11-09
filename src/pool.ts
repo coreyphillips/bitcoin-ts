@@ -160,7 +160,9 @@ export async function runPool(store: ChainStore, options: PoolOptions = {}, reco
 
   // Per-session timers handle handshakes and requests. A pool-wide timer also catches peers
   // that keep answering headers but cannot supply a target or an already known missing branch.
-  const tick = setInterval(wake, Math.min(1000, timeout));
+  const tick = setInterval(() => {
+    try { store.flushBlocks?.(); wake(); } catch (error) { stop(error); }
+  }, Math.min(1000, timeout));
   options.signal?.addEventListener('abort', abort, { once: true });
   try {
     beginRound();
@@ -209,8 +211,12 @@ export async function runPool(store: ChainStore, options: PoolOptions = {}, reco
     clearInterval(tick);
     options.signal?.removeEventListener('abort', abort);
     stop();
-    await Promise.allSettled([...connections.values()].map(({ session }) => session.done));
-    await lookup;
+    try {
+      store.flushBlocks?.();
+    } finally {
+      await Promise.allSettled([...connections.values()].map(({ session }) => session.done));
+      await lookup;
+    }
   }
   if (fatal) throw fatal.error;
 }

@@ -23,6 +23,9 @@
   },
   "files": [
     "dist",
+    "native/verify.c",
+    "native/COPYING.secp256k1",
+    "scripts/build-native.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -30,7 +33,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
     "start": "node dist/cli.js",
-    "conformance": "npm run build && bash scripts/conformance.sh"
+    "conformance": "npm run build && bash scripts/conformance.sh",
+    "build:native": "node scripts/build-native.mjs"
   },
   "dependencies": {
     "@noble/curves": "1.9.7"

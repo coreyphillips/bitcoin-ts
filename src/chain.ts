@@ -1,4 +1,4 @@
-import { checkBlock, checkBlockContext, parseBlock, type Block } from './block.js';
+import { checkBlock, parseBlock, type Block } from './block.js';
 import { applyChanges, connectBlock, utxoFingerprint } from './coins.js';
 import { MemoryBackend, type ChainBackend, type ChainRecord } from './chain-backend.js';
 import { networkParams, type NetworkOptions } from './params.js';
@@ -325,7 +325,7 @@ export class Chain {
   private receiveBlock(block: Block, raw: Buffer, now: number, via: Origin, requested: boolean): Verdict {
     const parent = this.entries.get(block.header.previous);
     const peerSegwit = via === 'p2p' && parent ? parent.height + 1 >= this.params.heights.segwit : undefined;
-    checkBlock(block, this.params, this.active[0].header.hash, peerSegwit);
+    const checkContext = checkBlock(block, this.params, this.active[0].header.hash, peerSegwit);
     const entry = this.acceptHeader(block.header, now, via === 'p2p');
     if (entry.bodyOrder) {
       this.activate();
@@ -335,7 +335,7 @@ export class Chain {
       this.activate();
       return { result: 'accepted', reason: 'unrequested-header-only' };
     }
-    try { checkBlockContext(block, entry.height, entry.parent!.mtp, this.params); }
+    try { checkContext(entry.height, entry.parent!.mtp); }
     catch (error) {
       if (error instanceof BlockFailure && error.result === 'invalid') this.markInvalid(entry);
       throw error;

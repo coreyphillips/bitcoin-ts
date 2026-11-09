@@ -6,6 +6,10 @@ import { networkName, networkOptions } from './input.js';
 import { SqliteBackend } from './sqlite-backend.js';
 import { ScriptPool } from './script-pool.js';
 
+const MAX_BATCH_BLOCKS = 32;
+const MAX_BATCH_BYTES = 16 * 1024 * 1024;
+const MAX_BATCH_AGE_MS = 1_000;
+
 export interface ChainStoreOptions {
   /** Total script verification threads including the calling thread. Use 1 for serial execution. */
   scriptThreads?: number;
@@ -35,6 +39,7 @@ export class ChainStore {
   readonly #db: DatabaseSync;
   readonly #scripts: ScriptPool;
   #open = true;
+  #batch?: { blocks: number; bytes: number; started: number };
 
   constructor(directory: string, network: string, options: object = {}, runtime: ChainStoreOptions = {}) {
     networkName(network);
@@ -50,7 +55,7 @@ export class ChainStore {
       this.chain = queries(this.#state, () => this.requireOpen());
       this.#db.exec('COMMIT');
     } catch (error) {
-      this.close();
+      this.discard();
       throw error;
     }
   }
@@ -63,13 +68,14 @@ export class ChainStore {
   // On failure SQLite rolls back on close. Discard the in-memory block index as well.
   private update<T>(operation: () => T): T {
     this.requireOpen();
+    this.flushBlocks();
     try {
       this.#db.exec('BEGIN IMMEDIATE');
       const result = operation();
       this.#db.exec('COMMIT');
       return result;
     } catch (error) {
-      this.close();
+      this.discard();
       throw error;
     }
   }
@@ -88,8 +94,7 @@ export class ChainStore {
   }
 
   forgetPeer(address: string) {
-    this.requireOpen();
-    this.#db.prepare('DELETE FROM peers WHERE address=?').run(address);
+    this.update(() => this.#db.prepare('DELETE FROM peers WHERE address=?').run(address));
   }
 
   headers(headers: Buffer[], now: number) {
@@ -98,11 +103,53 @@ export class ChainStore {
   block(block: Buffer, now: number, requested = true) {
     return this.update(() => this.#state.processBlock(block, now, 'p2p', requested));
   }
+
+  /** Validate immediately, grouping consecutive downloaded bodies into durable transactions. */
+  downloadBlock(block: Buffer, now: number, requested = true) {
+    this.requireOpen();
+    try {
+      if (this.#batch && this.#batch.bytes + block.length > MAX_BATCH_BYTES) this.flushBlocks();
+      if (!this.#batch) {
+        this.#db.exec('BEGIN IMMEDIATE');
+        this.#batch = { blocks: 0, bytes: 0, started: performance.now() };
+      }
+      const batch = this.#batch;
+      const result = this.#state.processBlock(block, now, 'p2p', requested);
+      batch.blocks++;
+      batch.bytes += block.length;
+      if (batch.blocks >= MAX_BATCH_BLOCKS || batch.bytes >= MAX_BATCH_BYTES ||
+          performance.now() - batch.started >= MAX_BATCH_AGE_MS) this.flushBlocks();
+      return result;
+    } catch (error) {
+      this.discard();
+      throw error;
+    }
+  }
+
+  /** Commit a partial group when a download is idle or before reporting completion. */
+  flushBlocks(): void {
+    if (!this.#batch) return;
+    try {
+      this.#db.exec('COMMIT');
+      this.#batch = undefined;
+    } catch (error) {
+      this.discard();
+      throw error;
+    }
+  }
+
   invalidate(hash: string) {
     return this.update(() => this.#state.invalidate(hash));
   }
   close() {
+    this.flushBlocks();
+    this.discard();
+  }
+
+  // Closing SQLite with an active transaction rolls it back. Never flush a failed write.
+  private discard() {
     if (this.#open) {
+      this.#batch = undefined;
       this.#scripts.close();
       this.#db.close();
       this.#open = false;

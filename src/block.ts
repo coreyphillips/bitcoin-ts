@@ -71,7 +71,8 @@ function witnessError(block: Block, active: boolean): string | null {
   return null;
 }
 
-export function checkBlock(block: Block, params: NetworkParams, genesis: string, peerSegwit?: boolean): void {
+/** Return the remaining contextual checks for this exact block after basic validation succeeds. */
+export function checkBlock(block: Block, params: NetworkParams, genesis: string, peerSegwit?: boolean) {
   const { root, mutated } = merkleRoot(block.ids);
   const coinbase = block.transactions[0];
   if (peerSegwit !== undefined) {
@@ -97,16 +98,20 @@ export function checkBlock(block: Block, params: NetworkParams, genesis: string,
     for (const output of tx.outputs) sigops += countSigOps(output.script, false);
   }
   if (sigops > 20000) throw new BlockFailure('invalid', 'bad-blk-sigops');
+  return (height: number, parentMtp: number) => checkBlockContext(block, height, parentMtp, params, peerSegwit);
 }
 
-export function checkBlockContext(block: Block, height: number, parentMtp: number, params: NetworkParams): void {
+function checkBlockContext(block: Block, height: number, parentMtp: number, params: NetworkParams, checkedSegwit?: boolean): void {
   const cutoff = height >= params.heights.csv ? parentMtp : block.header.time;
   if (block.transactions.some(tx => !isFinalTx(tx, height, cutoff))) throw new BlockFailure('invalid', 'bad-txns-nonfinal');
   if (height >= params.heights.bip34) {
     const prefix = pushScriptNumber(height);
     if (!block.transactions[0].inputs[0].script.subarray(0, prefix.length).equals(prefix)) throw new BlockFailure('invalid', 'bad-cb-height');
   }
-  const reason = witnessError(block, height >= params.heights.segwit);
-  if (reason) throw new BlockFailure('mutated', reason);
+  const active = height >= params.heights.segwit;
+  if (checkedSegwit !== active) {
+    const reason = witnessError(block, active);
+    if (reason) throw new BlockFailure('mutated', reason);
+  }
   if (block.stripped * 3 + block.total > 4000000) throw new BlockFailure('invalid', 'bad-blk-weight');
 }

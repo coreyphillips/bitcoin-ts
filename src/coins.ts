@@ -66,9 +66,11 @@ export function connectBlock(
   utxo: CoinView, params: NetworkParams, onBip34Chain: boolean, scripts?: ScriptPool,
 ): Changes {
   const changes: Changes = new Map();
+  const undo: Changes = new Map();
   const flags = blockFlags(params, block.header.hash, height);
   const txids = block.ids.map(id => id.toString('hex'));
-  if (height >= 1983702 || (!onBip34Chain && repeats[height] !== block.header.hash)) {
+  const checkOverwrites = height >= 1983702 || (!onBip34Chain && repeats[height] !== block.header.hash);
+  if (checkOverwrites) {
     for (let i = 0; i < txids.length; i++) {
       for (let vout = 0; vout < block.transactions[i].outputs.length; vout++) {
         if (utxo.has(key(txids[i], vout))) invalid('bad-txns-BIP30');
@@ -85,8 +87,10 @@ export function connectBlock(
       const coins: Coin[] = [];
       const inputs = tx.inputs.map(input => key(input.hash.toString('hex'), input.index));
       for (const outpoint of inputs) {
-        const coin = changes.has(outpoint) ? changes.get(outpoint) : utxo.get(outpoint);
+        const inBlock = changes.has(outpoint);
+        const coin = inBlock ? changes.get(outpoint) : utxo.get(outpoint);
         if (!coin) invalid('bad-txns-inputs-missingorspent');
+        if (!inBlock) undo.set(outpoint, coin);
         coins.push(coin);
         spent.push(coin.output);
       }
@@ -118,8 +122,11 @@ export function connectBlock(
   if (outputTotal(block.transactions[0]) > reward + fees) invalid('bad-cb-amount');
   const error = scripts ? scripts.verify(scriptChecks, flags) : verifyChecks(scriptChecks, flags);
   if (error !== 'OK') invalid(`block-script-verify-flag-failed (${scriptMessages[error] ?? error})`);
-  const undo: Changes = new Map();
-  for (const outpoint of changes.keys()) undo.set(outpoint, utxo.get(outpoint));
+  for (const outpoint of changes.keys()) {
+    // Spends already captured their original coins. BIP30, when enforced, also
+    // established that every new output was absent before the block.
+    if (!undo.has(outpoint)) undo.set(outpoint, checkOverwrites ? undefined : utxo.get(outpoint));
+  }
   // Core's historical duplicate coinbases replaced the earlier outputs permanently.
   if (repeats[height] === block.header.hash) {
     for (let vout = 0; vout < block.transactions[0].outputs.length; vout++) undo.set(key(txids[0], vout), undefined);

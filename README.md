@@ -40,6 +40,10 @@ node dist/cli.js sync --network testnet4 --max-peers 4 --follow
 
 The node checks spending scripts and their ECDSA and Schnorr signatures across CPU threads. By default it uses the number of CPUs available to Node.js, capped at eight. The count includes the calling thread. Blocks with few inputs stay on that thread to avoid worker overhead. The node applies a block's UTXO changes only after all its inputs pass verification.
 
+On macOS or Linux, run `npm run build:native` to enable Bitcoin Core's `libsecp256k1` for ECDSA and Schnorr verification on every thread. This needs a C compiler, tar, and Node.js headers. The build downloads and checks a pinned source archive. For offline builds, set `SECP256K1_TARBALL` to the local archive. Set `NODE_INCLUDE_DIR` if your headers are outside Node's installation prefix. JavaScript verification is available on all supported Node platforms.
+
+The node automatically uses the native verifier when installed. Set `BITCOIN_TS_CRYPTO=native` to require it or `BITCOIN_TS_CRYPTO=js` to select JavaScript. After building, `node --input-type=module -e "import { signatureBackend } from './dist/index.js'; console.log(signatureBackend)"` prints the selected backend without opening a database or connecting to peers.
+
 Use `--script-threads N` to choose 1 to 16 total verification threads independently of the peer count. For example, `node dist/cli.js sync --network testnet4 --script-threads 4 --follow` uses four for sufficiently large blocks. A value of 1 selects serial verification. You can change this setting when resuming an existing database.
 
 Use `sync` for a one-time download. It waits for the connected peers' header replies and for the active chain to reach the best known header work. `--stop-at` exits as soon as the requested hash becomes the active tip. `--follow` keeps the pool running and fills vacancies as peers leave. A fresh mainnet sync downloads and stores the full block history.
@@ -54,7 +58,7 @@ Explicit connections and the status command default to regtest when the network 
 
 Available networks are `main`, `testnet3`, `testnet4`, `signet`, and `regtest`. For a custom network configuration, pass an options object, for example `--options '{"testactivationheight":{"segwit":120}}'` on regtest. Supply the same network and options each time you open that data directory.
 
-Each directory contains its own `chain.sqlite`. A single transaction commits a block's validation state, undo data, active tip and UTXO changes together. Reopening reconstructs the header index and loads block bodies on demand. The node retains all accepted block bodies, undo data, and a header index for competing branches. Only one process can open a data directory at a time.
+Each directory contains its own `chain.sqlite`. During peer sync the node validates each block immediately and groups durable writes for up to 32 received blocks or 16 MiB of bodies. It also flushes about once a second and before sync returns. A single SQLite commit saves the group's block state, undo data, active tip and UTXO changes together. After an abrupt shutdown, sync resumes at the last committed tip. Direct library calls to `ChainStore.block()` still commit before returning. Reopening reconstructs the header index and loads block bodies on demand. Only one process can open a data directory at a time.
 
 ## Use the library
 
@@ -81,6 +85,20 @@ export function inspectTransaction(raw: Buffer) {
 The public API includes transaction and block decoding, legacy/SegWit/Taproot signature hashing, ECDSA and Schnorr verification, Merkle roots, Script execution through `verifyScript`, and in-memory chain selection. Amounts in the library use `bigint` satoshis. Hash functions return wire-order bytes. `displayHash` formats them for comparison with Bitcoin Core. For a disk-backed chain in an application, import `ChainStore` from `bitcoin-ts/node`. Call `await syncNetwork(store, { maxPeers: 8 })` for discovery, `await syncPeers(store, addresses)` for a fixed set, or `await syncPeer(store, address)` for one endpoint. All three functions are exported from `bitcoin-ts/node`. Pass an `AbortSignal` as the `signal` option to cancel a running sync. Close the store after the promise settles.
 
 To set a CPU limit in a Node.js application, open the database with `new ChainStore(directory, network, {}, { scriptThreads: 4 })`. The third argument holds the network options and the fourth holds runtime settings. The standalone `verifyScript` call and the default in-memory `Chain` use the calling thread.
+
+During peer sync, `onTip` reports validated progress, which can include blocks awaiting the next commit. A caller importing local blocks can use `store.downloadBlock()` for the same batching and call `store.flushBlocks()` or `store.close()` when finished.
+
+## Offline sync benchmark
+
+Build this checkout with `npm ci`, `npm run build`, and `npm run build:native`. In a separate checkout at commit `b8c30bf`, run `npm ci` and `npm run build`. From the current checkout, run
+
+```sh
+BITCOIN_TS_CRYPTO=native node scripts/bench-sync.mjs /path/to/baseline-checkout
+```
+
+The benchmark feeds identical signed regtest blocks into each version's download storage path using eight verification threads and temporary databases. It times seven groups of four blocks after warmup, includes the final durable commit in each group, and compares both chain tips and UTXO fingerprints after reopening. To measure the cost of committing each block against the same native build, run `BITCOIN_TS_CRYPTO=native node scripts/bench-sync.mjs . --baseline-per-block`.
+
+On an Apple M5 Pro with Node.js 24.22.1, median validation and storage time per block fell from 37.89 ms to 4.65 ms for blocks containing 128 ECDSA and 128 Schnorr signatures. Peer discovery, network transfer and mainnet-sized database lookups are outside this measurement.
 
 ## Conformance
 
