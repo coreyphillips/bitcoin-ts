@@ -1,0 +1,42 @@
+{
+  "name": "bitcoin-ts",
+  "version": "0.1.0",
+  "description": "Bitcoin consensus validation and a single-peer block downloader in TypeScript",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
+    }
+  },
+  "bin": {
+    "bitcoin-ts": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "start": "node dist/cli.js",
+    "conformance": "npm run build && bash scripts/conformance.sh"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}
